@@ -1,0 +1,111 @@
+# agentmemory Docker Compose
+# =============================================================================
+# Usage:
+#   1. Copy this file and .env.example to your server
+#   2. cp .env.example .env && edit .env (set GEMINI_API_KEY etc.)
+#   3. docker compose up -d
+#   4. Access REST API: http://YOUR_SERVER_IP:3111
+#      Access Viewer UI: http://YOUR_SERVER_IP:3113
+# =============================================================================
+
+services:
+  agentmemory:
+    image: ghcr.io/otaku-say/agentmemory:latest
+    container_name: agentmemory
+    restart: unless-stopped
+
+    ports:
+      # REST API + MCP HTTP — required, used by Claude/Cursor/Windsurf integrations
+      - "${III_REST_PORT:-3111}:3111"
+      # Viewer Web UI — memory visualization dashboard
+      - "${III_VIEWER_PORT:-3113}:3113"
+
+    volumes:
+      # Persistent memory data — DO NOT remove this volume
+      - agentmemory-data:/data
+
+    environment:
+      # ==========================================================
+      # SECURITY — set AGENTMEMORY_SECRET or it will be
+      # auto-generated and stored at /data/.agentmemory_secret
+      # All API calls require:  Authorization: Bearer <secret>
+      # ==========================================================
+      AGENTMEMORY_SECRET: "${AGENTMEMORY_SECRET:-}"
+
+      # ==========================================================
+      # EMBEDDING — Gemini Embedding 2 (free tier via AI Studio)
+      # Get key: https://aistudio.google.com/apikey
+      # ==========================================================
+      EMBEDDING_PROVIDER: "gemini"
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+
+      # ==========================================================
+      # LLM (optional) — for auto-compress & smart features
+      # Set one of the following if you want AI-powered compression
+      # ==========================================================
+      # Option A: OpenAI-compatible API
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+      # Option B: Gemini LLM (reuses same API key)
+      # GEMINI_MODEL: "${GEMINI_MODEL:-gemini-2.0-flash}"
+
+      # Enable LLM-powered auto compression (requires LLM key above)
+      AGENTMEMORY_AUTO_COMPRESS: "${AGENTMEMORY_AUTO_COMPRESS:-false}"
+
+      # ==========================================================
+      # STORAGE — SQLite file backend (recommended for single node)
+      # ==========================================================
+      AGENTMEMORY_DATA_DIR: "/data"
+      AGENTMEMORY_STATE_BACKEND: "${AGENTMEMORY_STATE_BACKEND:-file}"
+      AGENTMEMORY_STATE_SAVE_INTERVAL_MS: "${AGENTMEMORY_STATE_SAVE_INTERVAL_MS:-2000}"
+      # Redis (optional, for multi-instance deployments):
+      # AGENTMEMORY_STATE_BACKEND: "redis"
+      # AGENTMEMORY_REDIS_URL: "${AGENTMEMORY_REDIS_URL:-redis://redis:6379}"
+
+      # ==========================================================
+      # PORTS
+      # ==========================================================
+      III_REST_PORT: "3111"
+      III_STREAM_PORT: "3112"
+      III_VIEWER_PORT: "3113"
+      III_ENGINE_PORT: "49134"
+
+      # ==========================================================
+      # FEATURES
+      # ==========================================================
+      AGENTMEMORY_TOOLS: "${AGENTMEMORY_TOOLS:-all}"
+      AGENTMEMORY_INJECT_CONTEXT: "${AGENTMEMORY_INJECT_CONTEXT:-false}"
+      III_TELEMETRY_ENABLED: "false"
+      MALLOC_ARENA_MAX: "2"
+
+      # ==========================================================
+      # UID/GID remapping (optional, for volume permission fix)
+      # Set to match your host user: id -u && id -g
+      # ==========================================================
+      # AGENTMEMORY_DOCKER_UID: "1000"
+      # AGENTMEMORY_DOCKER_GID: "1000"
+
+    # File descriptor limit (recommended by upstream)
+    ulimits:
+      nofile:
+        soft: 10240
+        hard: 10240
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3111/agentmemory/livez"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+# Named volume for persistent memory storage
+volumes:
+  agentmemory-data:
+    driver: local
