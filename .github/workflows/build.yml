@@ -1,0 +1,173 @@
+name: Build and Push Docker Image
+
+# =============================================================================
+# Triggers:
+#   1. Daily schedule — checks upstream for new releases, builds if changed
+#   2. Push to main — rebuild when Dockerfile/entrypoint/workflow changes
+#   3. Manual dispatch — force build with optional version override
+# =============================================================================
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC — detects new upstream releases automatically
+    - cron: "0 6 * * *"
+
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "entrypoint.sh"
+      - ".github/workflows/build.yml"
+
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: "Force a specific agentmemory version (e.g. v0.9.30). Leave empty to use latest."
+        required: false
+        default: ""
+      force_rebuild:
+        description: "Force rebuild even if version unchanged"
+        type: boolean
+        required: false
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  UPSTREAM_REPO: rohitg00/agentmemory
+
+jobs:
+  check-and-build:
+    name: Check upstream & build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+
+    outputs:
+      should_build: ${{ steps.version.outputs.should_build }}
+      agentmemory_version: ${{ steps.version.outputs.agentmemory_version }}
+      iii_version: ${{ steps.version.outputs.iii_version }}
+      iii_sdk_version: ${{ steps.version.outputs.iii_sdk_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ github.event.inputs.force_version }}" ]; then
+            UPSTREAM_VERSION="${{ github.event.inputs.force_version }}"
+            echo "Using forced version: ${UPSTREAM_VERSION}"
+          else
+            UPSTREAM_VERSION=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases \
+              --jq '[.[] | select(.prerelease == false and .draft == false)] | first | .tag_name')
+            echo "Latest upstream version: ${UPSTREAM_VERSION}"
+          fi
+
+          PKG_JSON=$(curl -sf \
+            "https://raw.githubusercontent.com/${{ env.UPSTREAM_REPO }}/main/package.json")
+          III_SDK_VERSION=$(echo "$PKG_JSON" | python3 -c \
+            "import sys,json; d=json.load(sys.stdin); print(d['dependencies']['iii-sdk'])")
+          III_VERSION="$III_SDK_VERSION"
+
+          echo "agentmemory version : ${UPSTREAM_VERSION}"
+          echo "iii-sdk version     : ${III_SDK_VERSION}"
+
+          LAST_BUILT=""
+          if [ -f .github/last-built-version ]; then
+            LAST_BUILT=$(cat .github/last-built-version)
+          fi
+
+          SHOULD_BUILD=true
+          FORCE_REBUILD="${{ github.event.inputs.force_rebuild }}"
+          if [ "$UPSTREAM_VERSION" = "$LAST_BUILT" ] && \
+             [ "$FORCE_REBUILD" != "true" ] && \
+             [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Version ${UPSTREAM_VERSION} already built, skipping."
+            SHOULD_BUILD=false
+          fi
+
+          echo "agentmemory_version=${UPSTREAM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "iii_version=${III_VERSION}"              >> "$GITHUB_OUTPUT"
+          echo "iii_sdk_version=${III_SDK_VERSION}"      >> "$GITHUB_OUTPUT"
+          echo "should_build=${SHOULD_BUILD}"            >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build & push image
+    needs: check-and-build
+    if: needs.check-and-build.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.check-and-build.outputs.agentmemory_version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            AGENTMEMORY_VERSION=${{ needs.check-and-build.outputs.agentmemory_version }}
+            III_VERSION=${{ needs.check-and-build.outputs.iii_version }}
+            III_SDK_VERSION=${{ needs.check-and-build.outputs.iii_sdk_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update last-built-version tracking file
+        run: |
+          mkdir -p .github
+          echo "${{ needs.check-and-build.outputs.agentmemory_version }}" > .github/last-built-version
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/last-built-version
+          git diff --cached --quiet || \
+            git commit -m "chore: track built version ${{ needs.check-and-build.outputs.agentmemory_version }} [skip ci]"
+          git push
+
+      - name: Build summary
+        run: |
+          echo "## Build succeeded" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| agentmemory | \`${{ needs.check-and-build.outputs.agentmemory_version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| iii-engine  | \`${{ needs.check-and-build.outputs.iii_version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest      | \`${{ steps.build.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Platforms   | linux/amd64, linux/arm64 |" >> $GITHUB_STEP_SUMMARY

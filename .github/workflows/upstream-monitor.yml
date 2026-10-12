@@ -1,0 +1,64 @@
+name: Upstream Release Monitor
+
+# =============================================================================
+# Lightweight hourly job that immediately triggers a build when a new
+# upstream release of agentmemory is detected.
+# Complements the daily schedule in build.yml for faster response.
+# =============================================================================
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+env:
+  UPSTREAM_REPO: rohitg00/agentmemory
+
+jobs:
+  monitor:
+    name: Check upstream releases
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for new upstream release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_VERSION=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases \
+            --jq '[.[] | select(.prerelease == false and .draft == false)] | first | .tag_name')
+          echo "Upstream latest: ${UPSTREAM_VERSION}"
+
+          LAST_BUILT=""
+          if [ -f .github/last-built-version ]; then
+            LAST_BUILT=$(cat .github/last-built-version)
+          fi
+          echo "Last built: ${LAST_BUILT}"
+
+          if [ "$UPSTREAM_VERSION" != "$LAST_BUILT" ]; then
+            echo "New version detected: ${UPSTREAM_VERSION}"
+            echo "new_version=true"             >> "$GITHUB_OUTPUT"
+            echo "version=${UPSTREAM_VERSION}"  >> "$GITHUB_OUTPUT"
+          else
+            echo "No new version."
+            echo "new_version=false"            >> "$GITHUB_OUTPUT"
+            echo "version=${UPSTREAM_VERSION}"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger build for new version
+        if: steps.check.outputs.new_version == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build.yml \
+            --field force_version="${{ steps.check.outputs.version }}" \
+            --field force_rebuild=false
+          echo "Triggered build.yml for ${{ steps.check.outputs.version }}"
