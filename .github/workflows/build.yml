@@ -160,7 +160,12 @@ jobs:
           git add .github/last-built-version
           git diff --cached --quiet || \
             git commit -m "chore: track built version ${{ needs.check-and-build.outputs.agentmemory_version }} [skip ci]"
-          git push
+          # Retry push with rebase to handle concurrent run conflicts
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push && break
+            echo "Push attempt ${attempt} failed, retrying..."
+            sleep 5
+          done
 
       - name: Build summary
         run: |
